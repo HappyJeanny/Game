@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>MYGAME // C64 EDITION</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: monospace;
+  }
+  #hud {
+    width: 800px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    background: #000080;
+    border: 2px solid #5555ff;
+    color: #ffffff;
+    font-size: 13px;
+    letter-spacing: 1px;
+  }
+  #hud .team-red { color: #ff5555; }
+  #hud .team-blue { color: #5555ff; }
+  #hud .center { color: #ffff55; text-align: center; flex: 1; }
+  canvas {
+    display: block;
+    border: 2px solid #5555ff;
+    cursor: crosshair;
+  }
+  #statusbar {
+    width: 800px;
+    background: #000040;
+    border: 2px solid #5555ff;
+    border-top: none;
+    color: #55ff55;
+    font-size: 12px;
+    padding: 3px 8px;
+    letter-spacing: 1px;
+    min-height: 20px;
+  }
+  #overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.85);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    color: #ffff55;
+    font-family: monospace;
+    font-size: 28px;
+    letter-spacing: 3px;
+    z-index: 10;
+  }
+  #overlay.show { display: flex; }
+  #overlay .sub { font-size: 14px; color: #55ff55; margin-top: 16px; letter-spacing: 2px; }
+  #overlay .instructions {
+    margin-top: 18px;
+    font-size: 13px;
+    color: #aaaaff;
+    letter-spacing: 1px;
+    line-height: 2;
+    text-align: left;
+    border: 1px solid #5555ff;
+    padding: 12px 24px;
+    background: rgba(0,0,80,0.7);
+  }
+  #overlay .instructions .key { color: #ffff55; }
+  #overlay .instructions .goal { color: #55ff55; font-size: 14px; }
+  #overlay button {
+    margin-top: 24px;
+    background: #000080;
+    color: #ffff55;
+    border: 2px solid #5555ff;
+    font-family: monospace;
+    font-size: 16px;
+    padding: 8px 32px;
+    cursor: pointer;
+    letter-spacing: 2px;
+  }
+  #overlay button:hover { background: #0000c0; }
+</style>
+</head>
+<body>
+<div id="hud">
+  <div class="team-red" id="hud-red">RED: W1:?? W2:??</div>
+  <div class="center" id="hud-center">ROUND 1 | TIMER: 30</div>
+  <div class="team-blue" id="hud-blue">BLUE: W1:?? W2:??</div>
+</div>
+<canvas id="c" width="800" height="480"></canvas>
+<div id="statusbar" id="statusbar">READY</div>
+
+<div id="overlay">
+  <div id="overlay-title">MYGAME</div>
+  <div class="sub" id="overlay-sub">C64 EDITION</div>
+  <div class="instructions">
+    <div class="goal">ZIEL: Vernichte alle Würmer des Gegners mit deiner Bazooka!</div>
+    <div class="goal">ROT vs. BLAU — 2 Würmer pro Team — abwechselnd je 30 Sekunden.</div>
+    <br>
+    <span class="key">[A] / [D]</span> &nbsp;&nbsp;&nbsp; Wurm nach links / rechts bewegen<br>
+    <span class="key">[W] / [S]</span> &nbsp;&nbsp;&nbsp; Zielwinkel nach oben / unten drehen<br>
+    <span class="key">[SPACE]</span> &nbsp;&nbsp;&nbsp;&nbsp; Gedrückt halten = Schussstärke aufladen<br>
+    <span class="key">[SPACE]</span> &nbsp;&nbsp;&nbsp;&nbsp; Loslassen = Feuern!<br>
+    <br>
+    <span class="goal">Tipp: Längeres Halten = mehr Power. Winkel und Stärke kombinieren!</span>
+  </div>
+  <button id="overlay-btn">PLAY</button>
+</div>
+
+<script>
+"use strict";
+
+// ─── C64-ish palette ───────────────────────────────────────────────
+const C = {
+  sky:       '#0000a8',
+  skyHi:     '#000080',
+  ground:    '#55aa00',
+  dirt:      '#886600',
+  dirtDark:  '#554400',
+  red:       '#ff5555',
+  redDark:   '#aa0000',
+  blue:      '#5555ff',
+  blueDark:  '#0000aa',
+  yellow:    '#ffff55',
+  white:     '#ffffff',
+  black:     '#000000',
+  orange:    '#ff8800',
+  explosion: '#ffaa00',
+};
+
+// ─── Canvas setup ─────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width;   // 800
+const H = canvas.height;  // 480
+
+// ─── Terrain ──────────────────────────────────────────────────────
+class Terrain {
+  constructor() {
+    // solid[x][y] = true means solid ground
+    this.solid = new Uint8Array(W * H);
+    this.imageData = ctx.createImageData(W, H);
+    this.dirty = true;
+    this._generate();
+  }
+
+  _generate() {
+    // Build heightmap with multi-octave noise
+    const heights = new Float32Array(W);
+    const baseH = H * 0.55;
+    // Simple pseudo-random hills
+    let h = baseH;
+    const rand = seededRand(42);
+    for (let x = 0; x < W; x++) {
+      h += (rand() - 0.5) * 6;
+      h = Math.max(H * 0.3, Math.min(H * 0.82, h));
+      heights[x] = h;
+    }
+    // Smooth
+    for (let pass = 0; pass < 8; pass++) {
+      for (let x = 1; x < W - 1; x++) {
+        heights[x] = (heights[x-1] + heights[x] + heights[x+1]) / 3;
+      }
+    }
+    // Fill solid array
+    this.solid.fill(0);
+    for (let x = 0; x < W; x++) {
+      const top = Math.floor(heights[x]);
+      for (let y = top; y < H; y++) {
+        this.solid[y * W + x] = 1;
+      }
+    }
+    this.heights = heights;
+    this.dirty = true;
+  }
+
+  isSolid(x, y) {
+    x = Math.round(x); y = Math.round(y);
+    if (x < 0 || x >= W || y < 0 || y >= H) return y >= H; // floor below canvas
+    return this.solid[y * W + x] === 1;
+  }
+
+  // Returns surface Y for given X (-1 if none)
+  surfaceY(x) {
+    x = Math.floor(x);
+    if (x < 0 || x >= W) return H;
+    for (let y = 0; y < H; y++) {
+      if (this.solid[y * W + x]) return y;
+    }
+    return H;
+  }
+
+  // Blast a circular crater
+  explode(cx, cy, radius) {
+    const r2 = radius * radius;
+    const x0 = Math.max(0, Math.floor(cx - radius));
+    const x1 = Math.min(W - 1, Math.ceil(cx + radius));
+    const y0 = Math.max(0, Math.floor(cy - radius));
+    const y1 = Math.min(H - 1, Math.ceil(cy + radius));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dy = y - cy;
+        if (dx*dx + dy*dy <= r2) {
+          this.solid[y * W + x] = 0;
+        }
+      }
+    }
+    this.dirty = true;
+  }
+
+  draw() {
+    if (this.dirty) {
+    const data = this.imageData.data;
+    // Sky gradient (draw each pixel)
+    for (let y = 0; y < H; y++) {
+      const t = y / H;
+      // Sky: dark blue at top, slightly lighter below
+      const skyR = Math.floor(0 + t * 0);
+      const skyG = Math.floor(0 + t * 20);
+      const skyB = Math.floor(168 - t * 60);
+      for (let x = 0; x < W; x++) {
+        const idx = (y * W + x) * 4;
+        if (this.solid[y * W + x]) {
+          // Terrain layers
+          const sy = this.heights ? this.heights[x] : H * 0.55;
+          const depth = y - sy;
+          if (depth < 4) {
+            data[idx]   = 0x55; data[idx+1] = 0xaa; data[idx+2] = 0x00;
+          } else if (depth < 12) {
+            data[idx]   = 0x88; data[idx+1] = 0x66; data[idx+2] = 0x00;
+          } else {
+            data[idx]   = 0x55; data[idx+1] = 0x44; data[idx+2] = 0x00;
+          }
+          data[idx+3] = 255;
+        } else {
+          data[idx]   = skyR;
+          data[idx+1] = skyG;
+          data[idx+2] = skyB;
+          data[idx+3] = 255;
+        }
+      }
+    }
+      this.dirty = false;
+    }
+    ctx.putImageData(this.imageData, 0, 0);
+  }
+}
+
+// ─── Worm ─────────────────────────────────────────────────────────
+class Worm {
+  constructor(x, team, index) {
+    this.team  = team;   // 'red' | 'blue'
+    this.index = index;
+    this.x  = x;
+    this.y  = 0;
+    this.vx = 0;
+    this.vy = 0;
+    this.hp = 100;
+    this.alive = true;
+    this.onGround = false;
+    this.facing = team === 'red' ? 1 : -1; // 1=right, -1=left
+    this.aimAngle = -45; // degrees, 0=horizontal right
+    this.color  = team === 'red' ? C.red    : C.blue;
+    this.shadow = team === 'red' ? C.redDark : C.blueDark;
+    this.floatTimer = 0; // frames spent airborne
+  }
+
+  // Place on terrain surface
+  snapToGround(terrain) {
+    const sy = terrain.surfaceY(this.x);
+    this.y = sy - 8; // stand above surface
+    this.vy = 0;
+    this.onGround = true;
+  }
+
+  applyPhysics(terrain, dt) {
+    if (!this.alive) return;
+    const G = 400; // px/s²
+    this.vy += G * dt;
+    this.y  += this.vy * dt;
+    this.x  += this.vx * dt;
+    // Clamp X
+    this.x = Math.max(4, Math.min(W - 5, this.x));
+
+    // Ground collision
+    const footY = this.y + 8;
+    if (terrain.isSolid(this.x, footY)) {
+      // Find exact surface
+      let sy = this.y;
+      while (sy < H && !terrain.isSolid(this.x, sy + 8)) sy++;
+      this.y = Math.min(sy, terrain.surfaceY(this.x) - 8);
+      if (this.vy > 200) {
+        // Fall damage
+        const dmg = Math.floor((this.vy - 200) / 20);
+        this.takeDamage(dmg);
+      }
+      this.vy = 0;
+      this.vx = 0;
+      this.onGround = true;
+      this.floatTimer = 0;
+    } else {
+      this.onGround = false;
+      this.floatTimer++;
+    }
+  }
+
+  takeDamage(dmg) {
+    if (dmg <= 0 || !this.alive) return dmg;
+    dmg = Math.min(dmg, this.hp);
+    this.hp -= dmg;
+    if (this.hp <= 0) { this.hp = 0; this.alive = false; }
+    return dmg;
+  }
+
+  draw(isActive) {
+    if (!this.alive) return;
+    const x = Math.round(this.x);
+    const y = Math.round(this.y);
+    // Body (8×8 block worm)
+    ctx.fillStyle = this.shadow;
+    ctx.fillRect(x - 5, y - 5, 10, 10);
+    ctx.fillStyle = this.color;
+    ctx.fillRect(x - 4, y - 7, 8, 8);
+    // Eyes
+    ctx.fillStyle = C.white;
+    const ex = this.facing > 0 ? x + 1 : x - 3;
+    ctx.fillRect(ex, y - 6, 2, 2);
+    ctx.fillStyle = C.black;
+    ctx.fillRect(ex + (this.facing > 0 ? 1 : 0), y - 6, 1, 1);
+
+    // Aim indicator (line)
+    if (isActive) {
+      const ang = this.getAimRad();
+      const ax = x + Math.cos(ang) * 18;
+      const ay = (y - 3) + Math.sin(ang) * 18;
+      // Dark outline
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 3);
+      ctx.lineTo(ax, ay);
+      ctx.stroke();
+      // Bright white line on top
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 3);
+      ctx.lineTo(ax, ay);
+      ctx.stroke();
+
+      // HP bar above
+      ctx.fillStyle = '#000';
+      ctx.fillRect(x - 16, y - 20, 32, 5);
+      const hpW = Math.round((this.hp / 100) * 30);
+      const hpColor = this.hp > 50 ? '#55ff55' : this.hp > 25 ? '#ffff55' : '#ff5555';
+      ctx.fillStyle = hpColor;
+      ctx.fillRect(x - 15, y - 19, hpW, 3);
+
+      // Active marker
+      ctx.fillStyle = C.yellow;
+      ctx.fillRect(x - 2, y - 25, 4, 4);
+    } else {
+      // Small HP bar
+      ctx.fillStyle = '#000';
+      ctx.fillRect(x - 12, y - 17, 24, 4);
+      const hpW = Math.round((this.hp / 100) * 22);
+      ctx.fillStyle = this.color;
+      ctx.fillRect(x - 11, y - 16, hpW, 2);
+    }
+  }
+
+  getAimRad() {
+    // aimAngle: 0=right(east), negative=up, positive=down
+    // but we want up to be negative screen-Y
+    const deg = this.facing > 0 ? this.aimAngle : 180 - this.aimAngle;
+    return (deg * Math.PI) / 180;
+  }
+}
+
+// ─── Projectile ───────────────────────────────────────────────────
+class Projectile {
+  constructor(x, y, vx, vy) {
+    this.x  = x;  this.y  = y;
+    this.vx = vx; this.vy = vy;
+    this.alive = true;
+    this.trail = [];
+  }
+
+  update(terrain, dt) {
+    if (!this.alive) return;
+    const G = 400;
+    this.trail.push({x: this.x, y: this.y});
+    if (this.trail.length > 12) this.trail.shift();
+
+    this.vy += G * dt;
+    this.x  += this.vx * dt;
+    this.y  += this.vy * dt;
+
+    // Out of bounds
+    if (this.x < 0 || this.x >= W || this.y >= H + 20) {
+      this.alive = false;
+      return false;
+    }
+    // Terrain collision
+    if (this.y >= 0 && terrain.isSolid(this.x, this.y)) {
+      this.alive = false;
+      return true; // hit
+    }
+    return false;
+  }
+
+  draw() {
+    if (!this.alive) return;
+    // Trail
+    for (let i = 0; i < this.trail.length; i++) {
+      const t = this.trail[i];
+      const alpha = (i + 1) / this.trail.length;
+      ctx.fillStyle = `rgba(255,170,0,${alpha * 0.6})`;
+      ctx.fillRect(Math.round(t.x) - 1, Math.round(t.y) - 1, 2, 2);
+    }
+    // Projectile
+    ctx.fillStyle = C.yellow;
+    ctx.fillRect(Math.round(this.x) - 2, Math.round(this.y) - 2, 4, 4);
+    ctx.fillStyle = C.white;
+    ctx.fillRect(Math.round(this.x) - 1, Math.round(this.y) - 1, 2, 2);
+  }
+}
+
+// ─── Explosion particle ───────────────────────────────────────────
+class Particle {
+  constructor(x, y) {
+    this.x  = x; this.y = y;
+    const spd = 60 + Math.random() * 220;
+    const ang = Math.random() * Math.PI * 2;
+    this.vx = Math.cos(ang) * spd;
+    this.vy = Math.sin(ang) * spd - 80;
+    this.life = 0.4 + Math.random() * 0.4;
+    this.maxLife = this.life;
+    this.colors = [C.orange, C.yellow, C.white, C.red];
+    this.color  = this.colors[Math.floor(Math.random() * this.colors.length)];
+    this.size   = 2 + Math.floor(Math.random() * 3);
+  }
+  update(dt) {
+    this.vy += 300 * dt;
+    this.x  += this.vx * dt;
+    this.y  += this.vy * dt;
+    this.life -= dt;
+  }
+  draw() {
+    const a = Math.max(0, this.life / this.maxLife);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(Math.round(this.x), Math.round(this.y), this.size, this.size);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ─── Floating damage text ─────────────────────────────────────────
+class DamageText {
+  constructor(x, y, dmg, color) {
+    this.x = x; this.y = y;
+    this.text = `-${dmg}`;
+    this.color = color;
+    this.life = 1.2;
+    this.vy = -40;
+  }
+  update(dt) { this.y += this.vy * dt; this.life -= dt; }
+  draw() {
+    ctx.globalAlpha = Math.max(0, this.life / 1.2);
+    ctx.fillStyle = this.color;
+    ctx.font = 'bold 14px monospace';
+    ctx.fillText(this.text, this.x, this.y);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ─── Utility: seeded random ────────────────────────────────────────
+function seededRand(seed) {
+  let s = seed;
+  return () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff; };
+}
+
+// ─── GameEngine ───────────────────────────────────────────────────
+class GameEngine {
+  constructor() {
+    this.state = 'idle'; // idle | playing | firing | exploding | gameover
+    this.terrain    = null;
+    this.worms      = [];
+    this.projectile = null;
+    this.particles  = [];
+    this.texts      = [];
+    this.keys       = {};
+    this.chargeStart = 0;
+    this.charging   = false;
+    this.chargeBar  = 0; // 0..1
+    this.round      = 1;
+    this.turnTimer  = 30;
+    this.turnStart  = 0;
+    this.activeIdx  = 0; // index into this.worms
+    this.turnOrder  = []; // cycle of worm indices
+    this.turnOrderPos = 0;
+    this.winTeam    = null;
+    this.flashTimer = 0;
+    this.statusMsg  = '';
+    this._bindInput();
+    this._bindOverlay();
+  }
+
+  _bindInput() {
+    window.addEventListener('keydown', e => {
+      this.keys[e.code] = true;
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (this.state === 'playing' && this.activeWorm()?.onGround) {
+          if (!this.charging) {
+            this.charging = true;
+            this.chargeStart = performance.now();
+          }
+        }
+      }
+    });
+    window.addEventListener('keyup', e => {
+      this.keys[e.code] = false;
+      if (e.code === 'Space' && this.charging) {
+        this.charging = false;
+        this._fire();
+      }
+    });
+  }
+
+  _bindOverlay() {
+    document.getElementById('overlay-btn').addEventListener('click', () => {
+      document.getElementById('overlay').classList.remove('show');
+      this.init();
+    });
+    document.getElementById('overlay').classList.add('show');
+  }
+
+  init() {
+    this.terrain  = new Terrain();
+    this.particles = [];
+    this.texts     = [];
+    this.projectile = null;
+    this.round      = 1;
+    this.state      = 'playing';
+    this.charging   = false;
+    this.chargeBar  = 0;
+    this.winTeam    = null;
+
+    // Place worms on terrain
+    this.worms = [
+      new Worm(120,  'red',  0),
+      new Worm(260,  'red',  1),
+      new Worm(540,  'blue', 0),
+      new Worm(680,  'blue', 1),
+    ];
+    this.worms.forEach(w => w.snapToGround(this.terrain));
+
+    // Turn order: red0, blue0, red1, blue1
+    this.turnOrder = [0, 2, 1, 3];
+    this.turnOrderPos = 0;
+    this.activeIdx    = this.turnOrder[0];
+    this.turnStart    = performance.now();
+    this.turnTimer    = 30;
+    this._status(`${this.activeWorm().team.toUpperCase()} TEAM — YOUR MOVE!`);
+    requestAnimationFrame(t => this._loop(t));
+  }
+
+  activeWorm() { return this.worms[this.activeIdx]; }
+
+  _nextTurn() {
+    this.charging  = false;
+    this.chargeBar = 0;
+    this.projectile = null;
+
+    // Find next alive worm
+    let found = false;
+    for (let i = 1; i <= this.turnOrder.length; i++) {
+      const pos = (this.turnOrderPos + i) % this.turnOrder.length;
+      const wi  = this.turnOrder[pos];
+      if (this.worms[wi].alive) {
+        this.turnOrderPos = pos;
+        this.activeIdx    = wi;
+        found = true;
+        break;
+      }
+    }
+    if (!found) return; // shouldn't happen
+
+    this.round++;
+    this.turnStart = performance.now();
+    this.state     = 'playing';
+    const w = this.activeWorm();
+    this._status(`${w.team.toUpperCase()} WORM ${w.index + 1} — YOUR MOVE!`);
+  }
+
+  _checkWin() {
+    const redAlive  = this.worms.filter(w => w.team === 'red'  && w.alive).length;
+    const blueAlive = this.worms.filter(w => w.team === 'blue' && w.alive).length;
+    if (redAlive === 0 && blueAlive === 0) {
+      this._endGame('DRAW');
+      return true;
+    }
+    if (redAlive === 0) { this._endGame('BLUE'); return true; }
+    if (blueAlive === 0) { this._endGame('RED');  return true; }
+    return false;
+  }
+
+  _endGame(winner) {
+    this.state   = 'gameover';
+    this.winTeam = winner;
+    const ov  = document.getElementById('overlay');
+    const ttl = document.getElementById('overlay-title');
+    const sub = document.getElementById('overlay-sub');
+    ttl.textContent = winner === 'DRAW' ? 'DRAW!' : `${winner} TEAM WINS!`;
+    ttl.style.color = winner === 'RED' ? C.red : winner === 'BLUE' ? C.blue : C.yellow;
+    sub.textContent = 'PRESS PLAY TO RESTART';
+    ov.classList.add('show');
+  }
+
+  _fire() {
+    if (this.state !== 'playing') return;
+    const w = this.activeWorm();
+    if (!w || !w.alive || !w.onGround) return;
+
+    const charge = Math.min((performance.now() - this.chargeStart) / 1500, 1);
+    const speed  = 150 + charge * 650; // px/s
+    const ang    = w.getAimRad();
+    const vx     = Math.cos(ang) * speed;
+    const vy     = Math.sin(ang) * speed;
+
+    this.projectile = new Projectile(w.x, w.y - 3, vx, vy);
+    this.state      = 'firing';
+    this.chargeBar  = 0;
+    this._status(`FIRING! POWER: ${Math.round(charge * 100)}%`);
+  }
+
+  _explode(x, y) {
+    const radius = 32;
+    this.terrain.explode(x, y, radius);
+
+    // Spawn particles
+    for (let i = 0; i < 40; i++) this.particles.push(new Particle(x, y));
+
+    // Damage worms in radius
+    const dmgRadius = radius + 12;
+    this.worms.forEach(w => {
+      if (!w.alive) return;
+      const dx = w.x - x, dy = w.y - y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if (dist < dmgRadius) {
+        const dmg = Math.round(50 * (1 - dist / dmgRadius));
+        if (dmg > 0) {
+          const actual = w.takeDamage(dmg);
+          this.texts.push(new DamageText(w.x - 8, w.y - 15, actual,
+            w.team === 'red' ? C.red : C.blue));
+          // Knockback
+          if (dist > 0) {
+            w.vx += (dx / dist) * 120;
+            w.vy += (dy / dist) * 120 - 60;
+            w.onGround = false;
+          }
+        }
+      }
+    });
+
+    this.flashTimer = 0.12;
+    this.state = 'exploding';
+  }
+
+  _status(msg) {
+    this.statusMsg = msg;
+    document.getElementById('statusbar').textContent = msg;
+  }
+
+  _updateHUD() {
+    const r = this.worms.filter(w => w.team === 'red');
+    const b = this.worms.filter(w => w.team === 'blue');
+    document.getElementById('hud-red').textContent =
+      `RED: W1:${r[0].alive ? r[0].hp : 'XX'} W2:${r[1].alive ? r[1].hp : 'XX'}`;
+    document.getElementById('hud-blue').textContent =
+      `BLUE: W1:${b[0].alive ? b[0].hp : 'XX'} W2:${b[1].alive ? b[1].hp : 'XX'}`;
+
+    const elapsed = (performance.now() - this.turnStart) / 1000;
+    const remain  = Math.max(0, 30 - elapsed);
+    let timerColor = remain < 10 ? '#ff5555' : '#ffff55';
+    document.getElementById('hud-center').innerHTML =
+      `ROUND ${this.round} | <span style="color:${timerColor}">TIMER: ${Math.ceil(remain)}</span>`;
+
+    // Timer expired
+    if (remain <= 0 && this.state === 'playing') {
+      this._status('TIME OUT!');
+      setTimeout(() => this._nextTurn(), 800);
+      this.state = 'waiting';
+    }
+  }
+
+  _loop(now) {
+    const dt = Math.min((now - (this._lastTime || now)) / 1000, 0.05);
+    this._lastTime = now;
+
+    this._update(dt, now);
+    this._draw();
+    requestAnimationFrame(t => this._loop(t));
+  }
+
+  _update(dt, now) {
+    if (this.state === 'gameover' || this.state === 'idle') return;
+
+    // Flash timer (white flash on explosion)
+    if (this.flashTimer > 0) this.flashTimer -= dt;
+
+    // Input handling
+    if (this.state === 'playing') {
+      const w = this.activeWorm();
+      if (w && w.alive && w.onGround) {
+        const spd = 140 * dt;
+        if (this.keys['KeyA'] || this.keys['ArrowLeft']) {
+          w.x -= spd; w.facing = -1;
+          w.y = Math.min(w.y, this.terrain.surfaceY(w.x) - 8);
+        }
+        if (this.keys['KeyD'] || this.keys['ArrowRight']) {
+          w.x += spd; w.facing = 1;
+          w.y = Math.min(w.y, this.terrain.surfaceY(w.x) - 8);
+        }
+        if (this.keys['KeyW'] || this.keys['ArrowUp']) {
+          w.aimAngle = Math.max(-89, w.aimAngle - 60 * dt);
+        }
+        if (this.keys['KeyS'] || this.keys['ArrowDown']) {
+          w.aimAngle = Math.min(89, w.aimAngle + 60 * dt);
+        }
+        if (this.charging) {
+          this.chargeBar = Math.min((now - this.chargeStart) / 1500, 1);
+        }
+      }
+    }
+
+    // Physics for all worms
+    this.worms.forEach(w => {
+      if (w.alive) w.applyPhysics(this.terrain, dt);
+    });
+
+    // Projectile update
+    if (this.projectile && this.projectile.alive) {
+      const hit = this.projectile.update(this.terrain, dt);
+      if (hit) {
+        const px = this.projectile.x, py = this.projectile.y;
+        this.projectile.alive = false;
+        this._explode(px, py);
+      } else if (!this.projectile.alive) {
+        // Out of bounds — next turn
+        this.state = 'waiting';
+        setTimeout(() => {
+          if (!this._checkWin()) this._nextTurn();
+        }, 500);
+      }
+    }
+
+    // After explosion settled (particles gone & worms landed)
+    if (this.state === 'exploding') {
+      const allGrounded = this.worms.every(w => !w.alive || w.onGround);
+      if (allGrounded && this.particles.length === 0) {
+        this.state = 'waiting';
+        setTimeout(() => {
+          if (!this._checkWin()) this._nextTurn();
+        }, 600);
+      }
+    }
+
+    // Particles
+    this.particles = this.particles.filter(p => { p.update(dt); return p.life > 0; });
+    this.texts     = this.texts.filter(t => { t.update(dt); return t.life > 0; });
+
+    // HUD
+    if (this.state !== 'gameover') this._updateHUD();
+  }
+
+  _draw() {
+    // Flash overlay
+    if (this.flashTimer > 0) {
+      ctx.fillStyle = `rgba(255,200,80,${this.flashTimer * 4})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    this.terrain.draw();
+
+    // Worms
+    this.worms.forEach((w, i) => w.draw(i === this.activeIdx && this.state === 'playing'));
+
+    // Projectile
+    if (this.projectile) this.projectile.draw();
+
+    // Particles & texts
+    this.particles.forEach(p => p.draw());
+    this.texts.forEach(t => t.draw());
+
+    // Charge bar
+    if (this.charging && this.state === 'playing') {
+      const bx = 10, by = H - 20, bw = 200, bh = 12;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(bx, by, bw, bh);
+      ctx.fillStyle = `hsl(${120 - this.chargeBar * 120}, 100%, 50%)`;
+      ctx.fillRect(bx + 1, by + 1, Math.round((bw - 2) * this.chargeBar), bh - 2);
+      ctx.strokeStyle = C.yellow;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(bx, by, bw, bh);
+      ctx.fillStyle = C.white;
+      ctx.font = '10px monospace';
+      ctx.fillText('POWER', bx + 4, by + 9);
+    }
+
+    // Aim angle readout
+    if (this.state === 'playing') {
+      const w = this.activeWorm();
+      if (w && w.alive) {
+        ctx.fillStyle = C.yellow;
+        ctx.font = '11px monospace';
+        ctx.fillText(`AIM: ${Math.round(w.aimAngle < 0 ? -w.aimAngle : w.aimAngle)}° ${w.aimAngle < 0 ? 'UP' : 'DN'}  FACING: ${w.facing > 0 ? '>' : '<'}`, 10, 14);
+        ctx.fillStyle = '#55ffff';
+        ctx.fillText('A/D:MOVE  W/S:AIM  SPACE:CHARGE+FIRE', 10, 28);
+      }
+    }
+  }
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────
+const engine = new GameEngine();
+</script>
+</body>
+</html>
